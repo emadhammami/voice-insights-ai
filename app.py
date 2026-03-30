@@ -35,7 +35,7 @@ transcriber = pipeline(
 
 print("Loading summarization model (DistilBART)…")
 summarizer = pipeline(
-    "summarization",
+    "text2text-generation",   # 'summarization' alias removed in newer transformers
     model="sshleifer/distilbart-cnn-12-6",
     device=device,
 )
@@ -117,7 +117,7 @@ def summarize_text(text: str) -> str:
             min_length=30,
             do_sample=False,
         )
-        partial_summaries.append(result[0]["summary_text"])
+        partial_summaries.append(result[0]["generated_text"])
 
     return " ".join(partial_summaries)
 
