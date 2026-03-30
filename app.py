@@ -12,16 +12,25 @@ How to deploy:
 """
 
 import os
+import shutil
+import tempfile
 import torch
 import gradio as gr
 from transformers import pipeline, AutoTokenizer, AutoModelForSeq2SeqLM
 
-# ─── FFmpeg Bootstrap ─────────────────────────────────────────────────────────
-# Whisper (via librosa/soundfile) needs ffmpeg to decode MP3/WAV files.
-# imageio-ffmpeg ships its own binary so we never need a system-level install.
-import imageio_ffmpeg
-_ffmpeg_dir = os.path.dirname(imageio_ffmpeg.get_ffmpeg_exe())
-os.environ["PATH"] = _ffmpeg_dir + os.pathsep + os.environ.get("PATH", "")
+# ─── FFmpeg Bootstrap ─────────────────────────────────────────────────────────────
+# imageio-ffmpeg ships its own ffmpeg binary, but it has a version-specific
+# name (e.g. ffmpeg-win-x86_64-v7.1.exe). librosa / transformers look for a
+# file literally named 'ffmpeg' (or 'ffmpeg.exe' on Windows), so we copy the
+# binary into a temp folder under that name and prepend it to PATH.
+import imageio_ffmpeg as _iio_ffmpeg
+_ffmpeg_src = _iio_ffmpeg.get_ffmpeg_exe()
+_ffmpeg_tmp = tempfile.mkdtemp(prefix="voice_insights_ff_")
+_ffmpeg_exe = os.path.join(_ffmpeg_tmp, "ffmpeg.exe")
+if not os.path.exists(_ffmpeg_exe):
+    shutil.copy2(_ffmpeg_src, _ffmpeg_exe)
+os.environ["PATH"] = _ffmpeg_tmp + os.pathsep + os.environ.get("PATH", "")
+print(f"ffmpeg ready: {_ffmpeg_exe}")
 
 # ─── Device Setup ─────────────────────────────────────────────────────────────
 # Use the GPU if one is around — it makes a noticeable difference on long files.
