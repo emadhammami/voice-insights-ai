@@ -13,7 +13,7 @@ How to deploy:
 
 import torch
 import gradio as gr
-from transformers import pipeline
+from transformers import pipeline, AutoTokenizer, AutoModelForSeq2SeqLM
 
 # ─── Device Setup ─────────────────────────────────────────────────────────────
 # Use the GPU if one is around — it makes a noticeable difference on long files.
@@ -34,11 +34,13 @@ transcriber = pipeline(
 )
 
 print("Loading summarization model (DistilBART)…")
-summarizer = pipeline(
-    "text2text-generation",   # 'summarization' alias removed in newer transformers
-    model="sshleifer/distilbart-cnn-12-6",
-    device=device,
-)
+# The pipeline task registry no longer includes 'summarization' or
+# 'text2text-generation' in recent transformers builds, so we load
+# the tokenizer and model directly — same result, no registry needed.
+_sum_tokenizer = AutoTokenizer.from_pretrained("sshleifer/distilbart-cnn-12-6")
+_sum_model = AutoModelForSeq2SeqLM.from_pretrained("sshleifer/distilbart-cnn-12-6")
+if device == 0:
+    _sum_model = _sum_model.cuda()
 
 print("Loading emotion-detection model…")
 emotion_detector = pipeline(
@@ -111,13 +113,21 @@ def summarize_text(text: str) -> str:
         # Skip near-empty tail chunks that sometimes appear after splitting.
         if len(chunk.split()) < 10:
             continue
-        result = summarizer(
-            chunk,
+        inputs = _sum_tokenizer(
+            chunk, return_tensors="pt", max_length=1024, truncation=True
+        )
+        if device == 0:
+            inputs = {k: v.cuda() for k, v in inputs.items()}
+        ids = _sum_model.generate(
+            inputs["input_ids"],
             max_length=130,
             min_length=30,
+            num_beams=4,
             do_sample=False,
         )
-        partial_summaries.append(result[0]["generated_text"])
+        partial_summaries.append(
+            _sum_tokenizer.decode(ids[0], skip_special_tokens=True)
+        )
 
     return " ".join(partial_summaries)
 
@@ -192,7 +202,6 @@ def process_audio(audio_file):
 # ─── Gradio UI ────────────────────────────────────────────────────────────────
 with gr.Blocks(
     title="Audio Insight Tool",
-    theme=gr.themes.Soft(),
 ) as demo:
 
     gr.Markdown(
@@ -224,7 +233,6 @@ with gr.Blocks(
                 label="📝 Transcription",
                 lines=10,
                 placeholder="Transcription will appear here…",
-                show_copy_button=True,
             )
 
     with gr.Row():
@@ -232,7 +240,6 @@ with gr.Blocks(
             label="📋 Summary",
             lines=5,
             placeholder="Summary will appear here…",
-            show_copy_button=True,
         )
         emotion_output = gr.Textbox(
             label="🎭 Emotion Analysis",
@@ -261,4 +268,4 @@ if __name__ == "__main__":
     # share=False keeps the app local. Flip it to share=True and Gradio will
     # hand you a public URL that's valid for 72 hours — great for sharing a
     # quick demo without deploying anywhere.
-    demo.launch(share=False)
+    demo.launch(share=False, theme=gr.themes.Soft())
