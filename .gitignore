@@ -1,0 +1,46 @@
+# Python
+__pycache__/
+*.py[cod]
+*.pyo
+*.pyd
+*.so
+*.egg
+*.egg-info/
+dist/
+build/
+.eggs/
+
+# Virtual environments
+.venv/
+venv/
+env/
+ENV/
+
+# Hugging Face model cache (can be gigabytes — don't commit)
+.cache/
+*.bin
+*.safetensors
+*.pt
+*.ckpt
+
+# Audio files (test inputs — keep out of the repo)
+*.mp3
+*.wav
+*.flac
+*.m4a
+*.ogg
+
+# OS
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# IDE / editor
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# Gradio temp files
+gradio_cached_examples/
+flagged/

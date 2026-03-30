@@ -1,0 +1,18 @@
+# ─── Core ML / DL ─────────────────────────────────────────────────────────────
+torch>=2.1.0
+transformers>=4.40.0
+accelerate>=0.29.0        # required by some Transformers pipelines
+
+# ─── Audio Handling ───────────────────────────────────────────────────────────
+# librosa / soundfile are used by the Whisper pipeline to decode audio files.
+librosa>=0.10.0
+soundfile>=0.12.0
+
+# ─── Tokenization helpers (some summarization models need these) ──────────────
+sentencepiece>=0.1.99
+
+# ─── Web UI ───────────────────────────────────────────────────────────────────
+gradio>=4.20.0
+
+# ─── Utilities ────────────────────────────────────────────────────────────────
+numpy>=1.24.0
