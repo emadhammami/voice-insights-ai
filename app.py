@@ -11,9 +11,17 @@ How to deploy:
   Push this folder to a Hugging Face Space (SDK: Gradio) and you're live.
 """
 
+import os
 import torch
 import gradio as gr
 from transformers import pipeline, AutoTokenizer, AutoModelForSeq2SeqLM
+
+# ─── FFmpeg Bootstrap ─────────────────────────────────────────────────────────
+# Whisper (via librosa/soundfile) needs ffmpeg to decode MP3/WAV files.
+# imageio-ffmpeg ships its own binary so we never need a system-level install.
+import imageio_ffmpeg
+_ffmpeg_dir = os.path.dirname(imageio_ffmpeg.get_ffmpeg_exe())
+os.environ["PATH"] = _ffmpeg_dir + os.pathsep + os.environ.get("PATH", "")
 
 # ─── Device Setup ─────────────────────────────────────────────────────────────
 # Use the GPU if one is around — it makes a noticeable difference on long files.
