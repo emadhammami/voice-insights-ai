@@ -1,189 +1,137 @@
-# 🎙️ Voice Insights AI
+﻿# Voice Insights AI
 
-Ever sat through a long meeting recording or lecture and wished someone would just tell you what was said, what it meant, and how people felt about it? That's exactly what this tool does.
+**Author:** Emad Hammami
 
-Drop in an **MP3 or WAV** file and you'll walk away with:
+A local NLP tool that takes an audio recording and produces three outputs in one pass:
 
-| Step | What happens | Model used |
-|------|-------------|------------|
-| 1 | **Transcription** | OpenAI Whisper (small) |
-| 2 | **Summarization** | DistilBART CNN 12-6 |
-| 3 | **Emotion Detection** | j-hartmann/emotion-english-distilroberta-base |
+1. **Transcript** — full text of what was said (Whisper small)
+2. **Summary** — concise version of the key points (DistilBART)
+3. **Emotion breakdown** — per-emotion confidence scores across 7 categories (DistilRoBERTa)
 
-Everything runs locally on your machine (or in a Hugging Face Space). No API keys, no subscriptions, no data leaving your computer.
-
-Built with [Hugging Face Transformers](https://huggingface.co/docs/transformers) and [Gradio](https://gradio.app/).
+The motivation was practical: I needed a way to extract information from long meeting and lecture recordings without listening to them in full. The tool runs entirely on your machine — no external APIs, no data sent anywhere.
 
 ---
 
-## ✨ Features
+## Models
 
-- 🎤 **Reliable Speech-to-Text** — Whisper handles noisy recordings, strong accents, and files of any length without you lifting a finger.
-- 📋 **Smart Summarization** — No more reading through walls of text. Long transcripts are chunked automatically and condensed into a short, readable summary.
-- 🎭 **Emotion Analysis** — See at a glance whether a conversation was mostly upbeat, tense, or neutral across 7 emotion categories.
-- 🖥️ **Clean Web UI** — A minimal Gradio interface that anyone can use without any technical knowledge.
-- ⚡ **GPU / CPU auto-detection** — Uses your GPU when it finds one, gracefully falls back to CPU otherwise, zero config needed.
-- ☁️ **One-click Hugging Face Spaces deploy** — Push the folder, pick Gradio as the SDK, and you're live.
+| Task | Model | Why this one |
+|------|-------|-------------|
+| Speech recognition | `openai/whisper-small` | Strong multilingual performance, handles noisy recordings well, fast enough on CPU |
+| Summarisation | `sshleifer/distilbart-cnn-12-6` | Distilled version of BART, good abstractive quality at a fraction of the compute |
+| Emotion classification | `j-hartmann/emotion-english-distilroberta-base` | Covers 7 Ekman-based categories, well-documented fine-tuning methodology |
+
+All weights are downloaded automatically from Hugging Face on first run (~900 MB total).
 
 ---
 
-## 🗂️ Project Structure
+## Project layout
 
 ```
 voice-insights-ai/
-├── app.py            # Everything lives here: models, pipeline logic, and the Gradio UI
-├── requirements.txt  # pip dependencies
-└── README.md         # You're reading it
+├── app.py            # pipeline logic + Gradio UI
+├── requirements.txt  # dependencies
+└── README.md
 ```
 
 ---
 
-## 🚀 Installation
-
-### Prerequisites
-
-- Python 3.10 or later
-- pip
-
-### 1. Clone the repo
+## Setup
 
 ```bash
 git clone https://github.com/emadhammami/voice-insights-ai.git
 cd voice-insights-ai
-```
 
-### 2. (Optional) Create a virtual environment
-
-```bash
 python -m venv .venv
-
 # Windows
 .venv\Scripts\activate
-
 # macOS / Linux
 source .venv/bin/activate
-```
 
-### 3. Install dependencies
-
-```bash
 pip install -r requirements.txt
 ```
 
-> **GPU users:** Grab the CUDA-enabled PyTorch build first so you get the speed boost:
-> ```bash
-> pip install torch --index-url https://download.pytorch.org/whl/cu121
-> ```
-> Then `pip install -r requirements.txt` as usual.
+**GPU (optional):** install the CUDA-enabled PyTorch build before the rest:
+
+```bash
+pip install torch --index-url https://download.pytorch.org/whl/cu121
+pip install -r requirements.txt
+```
+
+**ffmpeg:** handled automatically. The `imageio-ffmpeg` package ships a static binary; the app registers it at startup so no system install is needed.
 
 ---
 
-## ▶️ Running Locally
+## Running
 
 ```bash
 python app.py
 ```
 
-Gradio will print a local URL (usually `http://127.0.0.1:7860`). Open it in your browser.
-
-> The **first run** will download all three models (about 900 MB combined). Grab a coffee — it only happens once. After that, everything loads from your local cache.
-
-To create a **public shareable link** (expires after 72 hours), change the last line of `app.py`:
-
-```python
-demo.launch(share=True)
-```
+Opens at `http://127.0.0.1:7860`. First run is slower — models need to download. After that they load from the local Hugging Face cache.
 
 ---
 
-## 📖 Example Usage
+## Usage
 
-1. Open `http://127.0.0.1:7860` in your browser after starting the app.
-2. Click the upload area and pick any MP3 or WAV file from your computer.
-3. Hit the big **✨ Analyze** button and wait a moment.
-4. That's it — your transcript, summary, and emotion scores will appear side by side.
+1. Upload an MP3 or WAV file.
+2. Click **Analyse**.
+3. Read the transcript, summary, and emotion scores.
 
-### Sample output
+Sample output for a short interview recording:
 
-**Transcription**
+**Transcript**
 ```
-Welcome everyone. Today we're going to talk about the importance of mental health
-in the workplace and how small daily habits can make a significant difference…
+Today we want to discuss the role of explainability in modern machine learning systems,
+particularly in high-stakes domains like healthcare and criminal justice...
 ```
 
 **Summary**
 ```
-Mental health in the workplace is influenced by small daily habits. Employers and
-employees alike benefit from simple routines that reduce stress and improve focus.
+Explainability in ML is critical in high-stakes domains. Researchers are working on
+methods that make model decisions interpretable without sacrificing accuracy.
 ```
 
-**Emotion Analysis**
+**Emotions**
 ```
-😄 joy        ████████████████     78.3%
-😐 neutral    ████                 18.1%
-😢 sadness    █                     2.4%
-😠 anger                            0.7%
-😨 fear                             0.4%
-😲 surprise                         0.1%
-🤢 disgust                          0.0%
+😐 neutral     ████████████████     80.2%
+😄 joy         ██                   11.4%
+😢 sadness     █                     5.1%
+😠 anger                             2.0%
+😨 fear                              0.9%
+😲 surprise                          0.3%
+🤢 disgust                           0.1%
 ```
 
 ---
 
-## 🖼️ Screenshots
+## Deploying on Hugging Face Spaces
 
-> Screenshots coming soon! Run the app locally or check the live Hugging Face Space once it's deployed.
+1. Create a new Space → SDK: **Gradio**
+2. Push this repo (or upload the three files manually)
+3. The Space installs dependencies and starts automatically
 
-<!-- Feel free to add your own screenshots here: drag an image into this file on GitHub -->
-
----
-
-## ☁️ Deploy on Hugging Face Spaces
-
-Want to share it with the world without any infra headaches? Hugging Face Spaces makes it trivial:
-
-1. Go to [huggingface.co/spaces](https://huggingface.co/spaces) and create a new Space.
-2. Pick **Gradio** as the SDK.
-3. Push this repo (or upload `app.py`, `requirements.txt`, and `README.md` manually).
-4. Sit back — the Space installs the dependencies and boots up on its own.
-
-CPU Spaces are free and perfectly usable. If you process a lot of audio, upgrading to a GPU Space will cut inference time significantly.
+CPU tier works fine. Upgrade to a GPU Space for significantly faster transcription on long files.
 
 ---
 
-## 🔧 Model Summary
+## Known limitations
 
-| Purpose | Model | Size |
-|---------|-------|------|
-| Transcription | [`openai/whisper-small`](https://huggingface.co/openai/whisper-small) | ~244 MB |
-| Summarization | [`sshleifer/distilbart-cnn-12-6`](https://huggingface.co/sshleifer/distilbart-cnn-12-6) | ~306 MB |
-| Emotion Detection | [`j-hartmann/emotion-english-distilroberta-base`](https://huggingface.co/j-hartmann/emotion-english-distilroberta-base) | ~329 MB |
-
-All models are downloaded automatically from the Hugging Face Hub on first use.
+- Emotion model is English-only and capped at 512 tokens; only the first ~400 words of the transcript are scored
+- Summarisation quality degrades on highly technical or domain-specific speech
+- Very short clips (under 5 seconds) often produce empty or unreliable transcripts
 
 ---
 
-## 🛣️ What's Next
+## Possible extensions
 
-There's a lot of room to grow here. Some ideas I'd love to tackle:
-
-- [ ] **Language picker** — let users tell Whisper which language to expect instead of always guessing.
-- [ ] **Better Whisper model** — `whisper-large-v3` is noticeably more accurate, especially on accented speech.
-- [ ] **Speaker diarization** — figure out *who* is talking when, using `pyannote-audio`.
-- [ ] **Topic / keyword extraction** — pull out the main themes automatically with a zero-shot classifier.
-- [ ] **Export button** — download your transcript and summary as a `.txt` or `.pdf` file.
-- [ ] **Batch mode** — drop in a whole folder of recordings and let it chew through them.
-- [ ] **Multilingual emotions** — the current model is English-only; supporting other languages would be huge.
-- [ ] **Live streaming** — show words appearing in real time as the audio plays, rather than waiting for the full result.
-
-PRs and ideas are very welcome — open an issue or fork away!
+- Speaker diarisation with `pyannote-audio`
+- Keyword / topic extraction via zero-shot classification
+- Export to PDF or structured JSON
+- Multilingual emotion detection
+- Streaming transcription with live word-by-word output
 
 ---
 
-## 🤝 Contributing
+## License
 
-Found a bug? Have a feature idea? Open an issue or submit a pull request — contributions of all sizes are appreciated.
-
-## 📄 License
-
-MIT — use it, modify it, ship it. Attribution appreciated but not required.
+MIT

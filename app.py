@@ -1,288 +1,208 @@
-"""
-Voice Insights AI
-=================
-Drop in an audio file and walk away with a full transcript, a tight summary,
-and a breakdown of the emotions behind the words — all in one click.
-
-How to run:
-  python app.py          → opens the app at http://127.0.0.1:7860
-
-How to deploy:
-  Push this folder to a Hugging Face Space (SDK: Gradio) and you're live.
-"""
+# Voice Insights AI
+# Author: Emad Hammami
+#
+# A small NLP pipeline that takes an audio recording and gives back three things:
+# the full transcript, a condensed summary, and an emotion breakdown.
+#
+# The motivation was simple — I kept sitting through long meeting recordings
+# just to find two key points. This automates that.
+#
+# Models used:
+#   - openai/whisper-small          → speech recognition
+#   - sshleifer/distilbart-cnn-12-6 → abstractive summarisation
+#   - j-hartmann/emotion-english-distilroberta-base → 7-class emotion scoring
+#
+# Run:  python app.py   (opens http://127.0.0.1:7860)
 
 import os
 import shutil
 import tempfile
+
 import torch
 import gradio as gr
 from transformers import pipeline, AutoTokenizer, AutoModelForSeq2SeqLM
 
-# ─── FFmpeg Bootstrap ─────────────────────────────────────────────────────────────
-# imageio-ffmpeg ships its own ffmpeg binary, but it has a version-specific
-# name (e.g. ffmpeg-win-x86_64-v7.1.exe). librosa / transformers look for a
-# file literally named 'ffmpeg' (or 'ffmpeg.exe' on Windows), so we copy the
-# binary into a temp folder under that name and prepend it to PATH.
-import imageio_ffmpeg as _iio_ffmpeg
-_ffmpeg_src = _iio_ffmpeg.get_ffmpeg_exe()
-_ffmpeg_tmp = tempfile.mkdtemp(prefix="voice_insights_ff_")
-_ffmpeg_exe = os.path.join(_ffmpeg_tmp, "ffmpeg.exe")
-if not os.path.exists(_ffmpeg_exe):
-    shutil.copy2(_ffmpeg_src, _ffmpeg_exe)
-os.environ["PATH"] = _ffmpeg_tmp + os.pathsep + os.environ.get("PATH", "")
-print(f"ffmpeg ready: {_ffmpeg_exe}")
+# ------------------------------------------------------------------
+# ffmpeg setup
+# ------------------------------------------------------------------
+# The Whisper pipeline needs ffmpeg to decode audio files.
+# We use imageio-ffmpeg which ships its own binary, but the binary
+# has a versioned filename like ffmpeg-win-x86_64-v7.1.exe — not
+# simply "ffmpeg". We copy it to a temp dir under the expected name
+# so any downstream library that calls subprocess("ffmpeg", ...)
+# can find it without a system-level install.
+import imageio_ffmpeg as _imageio_ffmpeg
 
-# ─── Device Setup ─────────────────────────────────────────────────────────────
-# Use the GPU if one is around — it makes a noticeable difference on long files.
-# No GPU? No problem. Everything runs on CPU just fine, just a bit slower.
+_src = _imageio_ffmpeg.get_ffmpeg_exe()
+_bin_dir = tempfile.mkdtemp(prefix="vi_ffmpeg_")
+_dst = os.path.join(_bin_dir, "ffmpeg.exe" if os.name == "nt" else "ffmpeg")
+shutil.copy2(_src, _dst)
+os.chmod(_dst, 0o755)
+os.environ["PATH"] = _bin_dir + os.pathsep + os.environ.get("PATH", "")
+
+# ------------------------------------------------------------------
+# Device
+# ------------------------------------------------------------------
 device = 0 if torch.cuda.is_available() else -1
-device_label = "GPU (CUDA)" if device == 0 else "CPU"
-print(f"Running on: {device_label}")
+print(f"[startup] device: {'GPU' if device == 0 else 'CPU'}")
 
-# ─── Load Models Once at Startup ──────────────────────────────────────────────
-# We load everything here — before the first request comes in — so the UI
-# feels snappy once it opens. The first run will download the model weights
-# from Hugging Face (~1 GB total); after that they're cached locally.
-print("Loading transcription model (Whisper small)…")
-transcriber = pipeline(
+# ------------------------------------------------------------------
+# Model loading  (done once at import time, not per request)
+# ------------------------------------------------------------------
+print("[startup] loading whisper-small ...")
+asr = pipeline(
     "automatic-speech-recognition",
     model="openai/whisper-small",
     device=device,
 )
 
-print("Loading summarization model (DistilBART)…")
-# The pipeline task registry no longer includes 'summarization' or
-# 'text2text-generation' in recent transformers builds, so we load
-# the tokenizer and model directly — same result, no registry needed.
-_sum_tokenizer = AutoTokenizer.from_pretrained("sshleifer/distilbart-cnn-12-6")
-_sum_model = AutoModelForSeq2SeqLM.from_pretrained("sshleifer/distilbart-cnn-12-6")
+# transformers ≥ 5.x removed 'summarization' from the pipeline registry,
+# so we load the seq2seq model directly.
+print("[startup] loading distilbart-cnn-12-6 ...")
+_tok = AutoTokenizer.from_pretrained("sshleifer/distilbart-cnn-12-6")
+_bart = AutoModelForSeq2SeqLM.from_pretrained("sshleifer/distilbart-cnn-12-6")
 if device == 0:
-    _sum_model = _sum_model.cuda()
+    _bart = _bart.cuda()
 
-print("Loading emotion-detection model…")
-emotion_detector = pipeline(
+print("[startup] loading emotion classifier ...")
+emotion_clf = pipeline(
     "text-classification",
     model="j-hartmann/emotion-english-distilroberta-base",
-    top_k=None,   # return scores for ALL emotion labels
+    top_k=None,
     device=device,
 )
 
-print("All models loaded — ready!\n")
+print("[startup] all models ready.\n")
 
-# ─── Emotion Label → Emoji Mapping ────────────────────────────────────────────
-EMOTION_EMOJI = {
-    "joy":      "😄",
-    "sadness":  "😢",
-    "anger":    "😠",
-    "fear":     "😨",
-    "surprise": "😲",
-    "disgust":  "🤢",
-    "neutral":  "😐",
+# Emotion → emoji, purely cosmetic
+_EMOJI = {
+    "joy": "😄", "sadness": "😢", "anger": "😠",
+    "fear": "😨", "surprise": "😲", "disgust": "🤢", "neutral": "😐",
 }
 
 
-# ─── Helper: Chunk Long Text ───────────────────────────────────────────────────
-def chunk_text(text: str, max_words: int = 180) -> list[str]:
+# ------------------------------------------------------------------
+# Core functions
+# ------------------------------------------------------------------
+
+def split_into_chunks(text: str, max_words: int = 180) -> list[str]:
     """
-    Break a long piece of text into bite-sized chunks the summarizer can handle.
-    Summarization models have a token limit (~1 024 tokens), so anything longer
-    needs to be split first. We use word count as a safe proxy for token count.
+    Split text into word-bounded chunks of at most max_words words.
+
+    DistilBART has a 1024-token hard limit. 180 words is a comfortable
+    budget that leaves room for tokeniser overhead.
     """
     words = text.split()
-    return [
-        " ".join(words[i : i + max_words])
-        for i in range(0, len(words), max_words)
-    ]
+    return [" ".join(words[i:i + max_words]) for i in range(0, len(words), max_words)]
 
 
-# ─── Step 1: Transcription ────────────────────────────────────────────────────
-def transcribe_audio(audio_path: str) -> str:
+def transcribe(audio_path: str) -> str:
     """
-    Turn the audio file into plain text using OpenAI's Whisper model.
+    Convert an audio file to text with Whisper.
 
-    Whisper is great at handling background noise, accents, and variable audio
-    quality. We pass chunk_length_s=30 so it automatically handles recordings
-    longer than 30 seconds — no manual splitting needed.
+    chunk_length_s=30 enables long-form mode — Whisper slides a 30-second
+    window across the file internally, so there's no length restriction on
+    the input we pass.
     """
-    result = transcriber(audio_path, chunk_length_s=30, batch_size=8)
-    return result["text"].strip()
+    out = asr(audio_path, chunk_length_s=30, batch_size=8)
+    return out["text"].strip()
 
 
-# ─── Step 2: Summarization ────────────────────────────────────────────────────
-def summarize_text(text: str) -> str:
+def summarise(text: str) -> str:
     """
-    Condense the transcript into the key points using DistilBART.
+    Produce a concise summary of the transcript text.
 
-    For longer transcripts we split the text into chunks, summarize each one,
-    then stitch the partial summaries together. This way even a 60-minute
-    recording produces a coherent, readable summary.
+    For transcripts longer than 180 words we summarise each chunk separately
+    and join the results. This keeps each batch within the model's token budget
+    while still covering the full recording.
     """
-    word_count = len(text.split())
+    if len(text.split()) < 30:
+        return text  # too short to be worth summarising
 
-    # Very short transcripts don't benefit from summarization.
-    if word_count < 30:
-        return "(Text too short to summarize — showing original)\n\n" + text
-
-    chunks = chunk_text(text, max_words=180)
-    partial_summaries = []
-
-    for chunk in chunks:
-        # Skip near-empty tail chunks that sometimes appear after splitting.
+    results = []
+    for chunk in split_into_chunks(text):
         if len(chunk.split()) < 10:
-            continue
-        inputs = _sum_tokenizer(
-            chunk, return_tensors="pt", max_length=1024, truncation=True
-        )
+            continue  # discard tiny leftover chunks
+        enc = _tok(chunk, return_tensors="pt", max_length=1024, truncation=True)
         if device == 0:
-            inputs = {k: v.cuda() for k, v in inputs.items()}
-        ids = _sum_model.generate(
-            inputs["input_ids"],
+            enc = {k: v.cuda() for k, v in enc.items()}
+        ids = _bart.generate(
+            enc["input_ids"],
             max_length=130,
             min_length=30,
             num_beams=4,
             do_sample=False,
         )
-        partial_summaries.append(
-            _sum_tokenizer.decode(ids[0], skip_special_tokens=True)
-        )
+        results.append(_tok.decode(ids[0], skip_special_tokens=True))
 
-    return " ".join(partial_summaries)
+    return " ".join(results)
 
 
-# ─── Step 3: Emotion Detection ────────────────────────────────────────────────
-def detect_emotions(text: str) -> str:
+def emotion_report(text: str) -> str:
     """
-    Score the text across 7 emotions and display them as a quick bar chart.
+    Run the emotion classifier and format results as an ASCII bar chart.
 
-    The emotion model caps out at 512 tokens (~400 words), so we feed it the
-    opening of the transcript. In practice the emotional tone of a conversation
-    comes through clearly in the first few hundred words.
+    The model has a 512-token ceiling, so we feed it the first ~400 words.
+    That's usually enough to capture the dominant emotional tone of a piece.
     """
-    # Truncate to ~400 words to stay within the model's token budget.
-    truncated = " ".join(text.split()[:400])
-
-    scores = emotion_detector(truncated)[0]   # list of {label, score}
-    scores.sort(key=lambda x: x["score"], reverse=True)
+    sample = " ".join(text.split()[:400])
+    scores = sorted(emotion_clf(sample)[0], key=lambda x: x["score"], reverse=True)
 
     lines = []
-    for item in scores:
-        label = item["label"]
-        pct   = item["score"] * 100
-        emoji = EMOTION_EMOJI.get(label, "")
-        # Build a simple ASCII bar (each block ≈ 5 %)
-        bar   = "█" * int(pct / 5)
-        lines.append(f"{emoji} {label:<10} {bar:<20} {pct:5.1f}%")
+    for s in scores:
+        label = s["label"]
+        pct = s["score"] * 100
+        bar = "█" * int(pct / 5)
+        lines.append(f"{_EMOJI.get(label, '')} {label:<10} {bar:<20} {pct:5.1f}%")
 
     return "\n".join(lines)
 
 
-# ─── Main Pipeline ────────────────────────────────────────────────────────────
-def process_audio(audio_file):
-    """
-    Run the full pipeline: audio → transcript → summary → emotions.
-
-    This is the function wired to the Analyze button. It calls each step in
-    order and returns the three result strings to the Gradio UI. Any exception
-    is caught and shown as a friendly error message instead of crashing.
-    """
+def run_pipeline(audio_file):
+    """Entry point called by the Gradio button."""
     if audio_file is None:
-        return (
-            "⚠️  Please upload an audio file first.",
-            "",
-            "",
-        )
+        return "Please upload an audio file.", "", ""
 
     try:
-        # --- Transcribe ---
-        transcript = transcribe_audio(audio_file)
-        if not transcript:
-            return (
-                "⚠️  Transcription returned empty output. "
-                "Please check that the file contains audible speech.",
-                "",
-                "",
-            )
-
-        # --- Summarize ---
-        summary = summarize_text(transcript)
-
-        # --- Emotions ---
-        emotions = detect_emotions(transcript)
-
-        return transcript, summary, emotions
-
-    except Exception as exc:
-        # Surface the error message in the UI so users know what went wrong.
-        return f"❌ Error: {exc}", "", ""
+        text = transcribe(audio_file)
+        if not text:
+            return "Transcription came back empty — is there speech in the file?", "", ""
+        return text, summarise(text), emotion_report(text)
+    except Exception as err:
+        return f"Error: {err}", "", ""
 
 
-# ─── Gradio UI ────────────────────────────────────────────────────────────────
-with gr.Blocks(
-    title="Audio Insight Tool",
-) as demo:
+# ------------------------------------------------------------------
+# UI
+# ------------------------------------------------------------------
+with gr.Blocks(title="Voice Insights AI") as demo:
 
-    gr.Markdown(
-        """
-        # 🎙️ Audio Insight Tool
-        Upload a **MP3** or **WAV** file to instantly get:
-        - 📝 A full **transcription**
-        - 📋 A concise **summary**
-        - 🎭 An **emotion analysis** of the speech
-        """
-    )
+    gr.Markdown("""
+    ## 🎙️ Voice Insights AI
+    Upload a recording and get a transcript, a summary, and an emotion breakdown — no API keys, runs locally.
+    """)
 
     with gr.Row():
-        # ── Left column: input + button ──
         with gr.Column(scale=1):
-            audio_input = gr.Audio(
-                type="filepath",
-                label="🔊 Upload Audio (MP3 / WAV)",
-            )
-            analyze_btn = gr.Button("✨ Analyze", variant="primary", size="lg")
-            gr.Markdown(
-                "_Processing time depends on audio length and hardware. "
-                "First run downloads the models (~1 GB total)._"
-            )
+            audio_input = gr.Audio(type="filepath", label="Audio file (MP3 or WAV)")
+            run_btn = gr.Button("Analyse", variant="primary")
+            gr.Markdown("_CPU inference can take 20–60 s depending on file length._")
 
-        # ── Right column: status placeholder while idle ──
         with gr.Column(scale=2):
-            transcript_output = gr.Textbox(
-                label="📝 Transcription",
-                lines=10,
-                placeholder="Transcription will appear here…",
-            )
+            out_transcript = gr.Textbox(label="Transcript", lines=10, placeholder="transcript appears here")
 
     with gr.Row():
-        summary_output = gr.Textbox(
-            label="📋 Summary",
-            lines=5,
-            placeholder="Summary will appear here…",
-        )
-        emotion_output = gr.Textbox(
-            label="🎭 Emotion Analysis",
-            lines=9,
-            placeholder="Emotion scores will appear here…",
-        )
+        out_summary = gr.Textbox(label="Summary", lines=5, placeholder="summary appears here")
+        out_emotions = gr.Textbox(label="Emotions", lines=9, placeholder="emotion scores appear here")
 
-    # Wire button click to the processing pipeline.
-    analyze_btn.click(
-        fn=process_audio,
+    run_btn.click(
+        fn=run_pipeline,
         inputs=[audio_input],
-        outputs=[transcript_output, summary_output, emotion_output],
-    )
-
-    gr.Markdown("---")
-    gr.Markdown(
-        "Built with [Hugging Face Transformers](https://huggingface.co/docs/transformers) "
-        "· [Whisper](https://huggingface.co/openai/whisper-small) "
-        "· [DistilBART](https://huggingface.co/sshleifer/distilbart-cnn-12-6) "
-        "· [Emotion Model](https://huggingface.co/j-hartmann/emotion-english-distilroberta-base)"
+        outputs=[out_transcript, out_summary, out_emotions],
     )
 
 
-# ─── Entry Point ──────────────────────────────────────────────────────────────
 if __name__ == "__main__":
-    # share=False keeps the app local. Flip it to share=True and Gradio will
-    # hand you a public URL that's valid for 72 hours — great for sharing a
-    # quick demo without deploying anywhere.
+    # share=True would generate a public Gradio tunnel URL valid for 72 h.
+    # Useful for a quick remote demo, but False is fine for local work.
     demo.launch(share=False, theme=gr.themes.Soft())
